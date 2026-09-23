@@ -199,9 +199,24 @@ window.addEventListener('mousemove',move);
 window.addEventListener('mouseup',up);
 
 /* ---------- camera ---------- */
+function frontCameraConstraint(){
+  // Prefer the front-facing camera. Try enumerating devices and matching a
+  // front/user label first; fall back to facingMode ideal 'user'.
+  return navigator.mediaDevices.enumerateDevices().then(function(list){
+    var cams=list.filter(function(d){return d.kind==='videoinput';});
+    var front=null;
+    for(var i=0;i<cams.length;i++){
+      var l=(cams[i].label||'').toLowerCase();
+      if(l.indexOf('front')>=0||l.indexOf('user')>=0||l.indexOf('face')>=0){ front=cams[i]; break; }
+    }
+    if(front&&front.deviceId) return {deviceId:{exact:front.deviceId}};
+    return {facingMode:{ideal:'user'}};
+  }).catch(function(){ return {facingMode:{ideal:'user'}}; });
+}
 function startCamera(){
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia) return Promise.reject();
-  return navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false})
+  return frontCameraConstraint()
+  .then(function(vc){ return navigator.mediaDevices.getUserMedia({video:vc,audio:false}); })
   .then(function(s){
     camV=document.createElement('video');
     camV.setAttribute('playsinline',''); camV.muted=true; camV.autoplay=true;

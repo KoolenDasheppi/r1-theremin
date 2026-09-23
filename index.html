@@ -25,7 +25,7 @@
     border:1px solid #2a2a34;background:#14141b;color:#7d7d8a;transition:all .12s ease}
   .pill.on{color:#fff;border-color:#fe5000;background:rgba(254,80,0,.16)}
   .pill.sel{border-color:#fff;box-shadow:0 0 0 1px #fff inset}
-  #hint{margin-top:auto;text-align:center;font-size:11px;color:#8a8a96;letter-spacing:.4px}
+  #hint{margin-top:auto;text-align:center;font-size:10px;line-height:1.45;color:#8a8a96;letter-spacing:.4px}
   #hint b{color:#fe5000}
   .stopped #hint{color:#fe5000}
 </style>
@@ -40,7 +40,7 @@
   </div>
   <div id="bar"><i id="barFill"></i></div>
   <div id="pills"></div>
-  <div id="hint">tap to start &middot; <b>scroll</b> = pick fx</div>
+  <div id="hint">tap to start &middot; <b>scroll</b> pick fx<br><b>side</b> toggle &middot; <b>hold</b> mute &middot; drag tune</div>
 </div>
 <script>
 (function(){
@@ -56,7 +56,7 @@ var FX=[{id:'vibrato',n:'Vib'},{id:'echo',n:'Echo'},{id:'wah',n:'Wah'},
 var on={vibrato:true,echo:false,wah:false,octave:false,reverb:true};
 var sel=0;
 
-var lum=0.32, tilt=0, fine=0, muted=false, started=false, mode='camera';
+var lum=0.32, tilt=0, fine=0, muted=false, started=false, mode='camera', camFrames=0;
 var ac,osc,sub,subG,noteG,mix,flt,wahLFO,wahG,dl,fb,echoW,conv,revW,dry,post,master,vibLFO,vibG;
 var camV=null,camC=null,camX=null,camT=null;
 
@@ -112,9 +112,8 @@ function initAudio(){
   osc=ac.createOscillator(); osc.type='triangle';
   sub=ac.createOscillator(); sub.type='sine';
   subG=ac.createGain(); subG.gain.value=0;
-  osc.connect(subG); sub.connect(subG);
   noteG=ac.createGain(); noteG.gain.value=0;
-  subG.connect(noteG);
+  osc.connect(noteG); sub.connect(subG); subG.connect(noteG);
   flt=ac.createBiquadFilter(); flt.type='lowpass'; flt.frequency.value=6000; flt.Q.value=7;
   noteG.connect(flt);
   vibLFO=ac.createOscillator(); vibLFO.frequency.value=5.5;
@@ -173,11 +172,17 @@ window.addEventListener('longPressEnd',function(){ muted=false; gate(); paintPit
 
 var drag=null;
 function pt(e){ var t=e.touches?e.touches[0]:e; return {x:t.clientX,y:t.clientY}; }
-function down(e){ resume(); var p=pt(e); drag={y:p.y,f:fine}; if(!started){started=true;boot();} }
+function down(e){ resume(); var p=pt(e); drag={y:p.y,f:fine,l:lum}; if(!started){started=true;boot();} }
 function move(e){
   if(!drag) return;
   var p=pt(e), d=(drag.y-p.y)/2;         // drag up = sharper
-  fine=clamp(drag.f+d,-1200,1200); gate(); paintPitch();
+  if(mode==='touch'){
+    /* no sensor: the drag itself is the pitch control */
+    lum=clamp(drag.l+d/160,0,1);
+  }else{
+    fine=clamp(drag.f+d,-1200,1200);     // sensor live: drag = fine tune
+  }
+  gate(); paintPitch();
   if(e.cancelable) e.preventDefault();
 }
 function up(){ drag=null; }
@@ -209,6 +214,7 @@ function sample(){
   var d=camX.getImageData(0,8,32,16).data, s=0, n=0;
   for(var i=0;i<d.length;i+=4){ s+=(d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114); n++; }
   var raw=(s/n)/255;
+  camFrames++;
   lum=lum*(1-SMOOTH)+raw*SMOOTH;
 }
 /* ---------- tilt fallback ---------- */
@@ -225,8 +231,22 @@ function startTilt(){
     mode='tilt'; return true;
   }catch(e){ return false; }
 }
+function stopCamera(){
+  if(camT){ cancelAnimationFrame(camT); camT=null; }
+  if(camV&&camV.srcObject){
+    try{ camV.srcObject.getTracks().forEach(function(t){t.stop();}); }catch(e){}
+  }
+  camV=null;
+}
+function fallback(){
+  if(camFrames>1) return;            /* camera is feeding: leave it alone */
+  stopCamera();
+  if(startTilt()) return;
+  mode='touch';
+}
 function boot(){
-  startCamera().catch(function(){ if(!startTilt()) mode='touch'; });
+  startCamera().catch(fallback);
+  setTimeout(function(){ if(camFrames<2 && mode==='camera') fallback(); },2500);
 }
 /* keep the tone tracking while camera/tilt feed updates */
 (function loop(){ gate(); paintPitch(); setTimeout(loop,50); })();

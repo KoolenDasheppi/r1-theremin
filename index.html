@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=240,height=282,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0f">
+<title>r1 Theremin</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}
+  html,body{width:240px;height:282px;overflow:hidden;background:#0b0b0f;color:#f2f2f5;
+    font:13px/1.2 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  #app{position:relative;width:240px;height:282px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+  #glow{position:absolute;inset:0;pointer-events:none;opacity:.5;
+    background:radial-gradient(120px 90px at 50% 34%,rgba(254,80,0,.30),transparent 70%)}
+  #readout{position:relative;text-align:center;padding-top:4px}
+  #note{font-size:44px;line-height:1;font-weight:700;letter-spacing:1px;color:#fff;
+    text-shadow:0 0 14px rgba(254,80,0,.55)}
+  #hz{margin-top:4px;font-size:12px;color:#9a9aa6;letter-spacing:.5px}
+  #src{margin-top:2px;font-size:10px;color:#6f6f7a;letter-spacing:.5px}
+  #bar{margin:2px 2px 0;height:6px;border-radius:3px;background:#1c1c24;overflow:hidden}
+  #barFill{display:block;height:100%;width:100%;border-radius:3px;transform-origin:0 50%;transform:scaleX(0);
+    background:linear-gradient(90deg,#fe5000,#ffb27a);transition:transform .06s linear}
+  #pills{display:flex;flex-wrap:wrap;gap:5px;justify-content:center;margin-top:2px}
+  .pill{padding:3px 7px;border-radius:9px;font-size:10px;letter-spacing:.3px;
+    border:1px solid #2a2a34;background:#14141b;color:#7d7d8a;transition:all .12s ease}
+  .pill.on{color:#fff;border-color:#fe5000;background:rgba(254,80,0,.16)}
+  .pill.sel{border-color:#fff;box-shadow:0 0 0 1px #fff inset}
+  #hint{margin-top:auto;text-align:center;font-size:11px;color:#8a8a96;letter-spacing:.4px}
+  #hint b{color:#fe5000}
+  .stopped #hint{color:#fe5000}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="glow"></div>
+  <div id="readout">
+    <div id="note">C3</div>
+    <div id="hz">130.8 Hz</div>
+    <div id="src">camera &middot; tap to begin</div>
+  </div>
+  <div id="bar"><i id="barFill"></i></div>
+  <div id="pills"></div>
+  <div id="hint">tap to start &middot; <b>scroll</b> = pick fx</div>
+</div>
+<script>
+(function(){
+"use strict";
+var $=function(i){return document.getElementById(i);};
+var clamp=function(v,a,b){return v<a?a:(v>b?b:v);};
+
+var C3=130.81, C5=523.25, OCT=Math.log2(C5/C3); // 2 octaves
+var DARK=0.13, SMOOTH=0.18, GLIDE=0.05;
+
+var FX=[{id:'vibrato',n:'Vib'},{id:'echo',n:'Echo'},{id:'wah',n:'Wah'},
+        {id:'octave',n:'Oct'},{id:'reverb',n:'Verb'}];
+var on={vibrato:true,echo:false,wah:false,octave:false,reverb:true};
+var sel=0;
+
+var lum=0.32, tilt=0, fine=0, muted=false, started=false, mode='camera';
+var ac,osc,sub,subG,noteG,mix,flt,wahLFO,wahG,dl,fb,echoW,conv,revW,dry,post,master,vibLFO,vibG;
+var camV=null,camC=null,camX=null,camT=null;
+
+/* ---------- UI ---------- */
+var pillsEl=$('pills');
+FX.forEach(function(f,i){
+  var d=document.createElement('div');
+  d.className='pill';d.dataset.i=i;d.textContent=f.n;
+  pillsEl.appendChild(d);
+});
+var pillEls=[].slice.call(pillsEl.children);
+function paintPills(){
+  for(var i=0;i<pillEls.length;i++){
+    var e=pillEls[i];
+    e.className='pill'+(on[FX[i].id]?' on':'')+(i===sel?' sel':'');
+  }
+}
+paintPills();
+
+var NAMES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+function noteName(f){
+  var n=Math.round(12*Math.log2(f/440)+69);
+  return NAMES[((n%12)+12)%12]+(Math.floor(n/12)-1);
+}
+var lastNote='',lastHz='',lastBar=-1,lastSrc='';
+function paintPitch(){
+  var l=clamp(lum,0,1);
+  var f=freqFor(l);
+  var n=muted?'--':noteName(f);
+  var h=muted?'muted':(f.toFixed(1)+' Hz');
+  var s=mode+(fine?' \u00b7 tune '+fine.toFixed(0):'')+(muted?' \u00b7 OFF':'');
+  if(n!==lastNote){ $('note').textContent=n; lastNote=n; }
+  if(h!==lastHz){ $('hz').textContent=h; lastHz=h; }
+  var b=Math.round(l*100)/100;
+  if(b!==lastBar){ $('barFill').style.transform='scaleX('+b+')'; lastBar=b; }
+  if(s!==lastSrc){ $('src').textContent=s; lastSrc=s; }
+}
+function freqFor(l){ return C3*Math.pow(2,OCT*clamp(l,0,1)+fine/1200); }
+
+/* ---------- audio ---------- */
+function impulse(ac,dur,decay){
+  var n=Math.floor(ac.sampleRate*dur),b=ac.createBuffer(2,n,ac.sampleRate);
+  for(var c=0;c<2;c++){
+    var d=b.getChannelData(c);
+    for(var i=0;i<n;i++){ d[i]=(Math.random()*2-1)*Math.pow(1-i/n,decay); }
+  }
+  return b;
+}
+function initAudio(){
+  if(ac) return;
+  var AC=window.AudioContext||window.webkitAudioContext;
+  ac=new AC();
+  osc=ac.createOscillator(); osc.type='triangle';
+  sub=ac.createOscillator(); sub.type='sine';
+  subG=ac.createGain(); subG.gain.value=0;
+  osc.connect(subG); sub.connect(subG);
+  noteG=ac.createGain(); noteG.gain.value=0;
+  subG.connect(noteG);
+  flt=ac.createBiquadFilter(); flt.type='lowpass'; flt.frequency.value=6000; flt.Q.value=7;
+  noteG.connect(flt);
+  vibLFO=ac.createOscillator(); vibLFO.frequency.value=5.5;
+  vibG=ac.createGain(); vibG.gain.value=8;
+  vibLFO.connect(vibG); vibG.connect(osc.detune); vibG.connect(sub.detune);
+  wahLFO=ac.createOscillator(); wahLFO.frequency.value=1.8;
+  wahG=ac.createGain(); wahG.gain.value=0;
+  wahLFO.connect(wahG); wahG.connect(flt.frequency);
+  mix=ac.createGain(); mix.gain.value=0.9;
+  flt.connect(mix);
+  dl=ac.createDelay(1.0); dl.delayTime.value=0.28;
+  fb=ac.createGain(); fb.gain.value=0.34;
+  echoW=ac.createGain(); echoW.gain.value=0;
+  dl.connect(fb); fb.connect(dl); dl.connect(echoW);
+  dry=ac.createGain(); dry.gain.value=1;
+  post=ac.createGain(); post.gain.value=1;
+  mix.connect(dry); dry.connect(post);
+  mix.connect(dl); echoW.connect(post);
+  conv=ac.createConvolver(); conv.buffer=impulse(ac,1.9,2.6);
+  revW=ac.createGain(); revW.gain.value=0;
+  post.connect(conv); conv.connect(revW);
+  master=ac.createGain(); master.gain.value=0.9;
+  revW.connect(master); post.connect(master);
+  master.connect(ac.destination);
+  osc.start(); sub.start(); vibLFO.start(); wahLFO.start();
+  applyFx();
+}
+function applyFx(){
+  if(!ac) return;
+  var t=ac.currentTime;
+  vibG.gain.setTargetAtTime(on.vibrato?8:0,t,.02);
+  echoW.gain.setTargetAtTime(on.echo?0.5:0,t,.02);
+  fb.gain.setTargetAtTime(on.echo?0.34:0,t,.02);
+  subG.gain.setTargetAtTime(on.octave?0.34:0,t,.02);
+  revW.gain.setTargetAtTime(on.reverb?0.5:0,t,.02);
+  if(on.wah){ flt.frequency.setTargetAtTime(1300,t,.05); wahG.gain.setTargetAtTime(950,t,.05); }
+  else { wahG.gain.setTargetAtTime(0,t,.05); flt.frequency.setTargetAtTime(6000,t,.05); }
+}
+function gate(){
+  if(!ac) return;
+  var t=ac.currentTime;
+  var open=!muted && lum>DARK;
+  noteG.gain.setTargetAtTime(open?0.22:0,t,open?0.02:0.03);
+  osc.frequency.setTargetAtTime(freqFor(lum),t,GLIDE);
+  sub.frequency.setTargetAtTime(freqFor(lum)/2,t,GLIDE);
+}
+
+/* ---------- inputs ---------- */
+function resume(){ initAudio(); if(ac.state==='suspended') ac.resume(); }
+
+window.addEventListener('scrollUp',function(){ sel=(sel+1)%FX.length; paintPills(); });
+window.addEventListener('scrollDown',function(){ sel=(sel+FX.length-1)%FX.length; paintPills(); });
+window.addEventListener('sideClick',function(){ var id=FX[sel].id; on[id]=!on[id]; applyFx(); paintPills(); });
+window.addEventListener('longPressStart',function(){ muted=true; gate(); paintPitch(); });
+window.addEventListener('longPressEnd',function(){ muted=false; gate(); paintPitch(); });
+
+var drag=null;
+function pt(e){ var t=e.touches?e.touches[0]:e; return {x:t.clientX,y:t.clientY}; }
+function down(e){ resume(); var p=pt(e); drag={y:p.y,f:fine}; if(!started){started=true;boot();} }
+function move(e){
+  if(!drag) return;
+  var p=pt(e), d=(drag.y-p.y)/2;         // drag up = sharper
+  fine=clamp(drag.f+d,-1200,1200); gate(); paintPitch();
+  if(e.cancelable) e.preventDefault();
+}
+function up(){ drag=null; }
+var app=$('app');
+app.addEventListener('touchstart',down,{passive:true});
+app.addEventListener('touchmove',move,{passive:false});
+app.addEventListener('touchend',up); app.addEventListener('touchcancel',up);
+app.addEventListener('mousedown',down);
+window.addEventListener('mousemove',move);
+window.addEventListener('mouseup',up);
+
+/* ---------- camera ---------- */
+function startCamera(){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia) return Promise.reject();
+  return navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false})
+  .then(function(s){
+    camV=document.createElement('video');
+    camV.setAttribute('playsinline',''); camV.muted=true; camV.autoplay=true;
+    camV.srcObject=s;
+    camC=document.createElement('canvas'); camC.width=32; camC.height=32;
+    camX=camC.getContext('2d',{willReadFrequently:true});
+    return camV.play();
+  }).then(function(){ mode='camera'; sample(); });
+}
+function sample(){
+  camT=requestAnimationFrame(sample);
+  if(!camV||camV.readyState<2) return;
+  camX.drawImage(camV,0,0,32,32);
+  var d=camX.getImageData(0,8,32,16).data, s=0, n=0;
+  for(var i=0;i<d.length;i+=4){ s+=(d[i]*0.299+d[i+1]*0.587+d[i+2]*0.114); n++; }
+  var raw=(s/n)/255;
+  lum=lum*(1-SMOOTH)+raw*SMOOTH;
+}
+/* ---------- tilt fallback ---------- */
+function startTilt(){
+  var cs=window.creationSensors;
+  if(!cs||!cs.accelerometer) return false;
+  try{
+    cs.accelerometer.start(function(d){
+      if(!d) return;
+      var t=(d.tiltX!==undefined?d.tiltX:(d.x||0));
+      var raw=clamp((t+1)/2,0,1);
+      lum=lum*(1-SMOOTH)+raw*SMOOTH;
+    },{frequency:60});
+    mode='tilt'; return true;
+  }catch(e){ return false; }
+}
+function boot(){
+  startCamera().catch(function(){ if(!startTilt()) mode='touch'; });
+}
+/* keep the tone tracking while camera/tilt feed updates */
+(function loop(){ gate(); paintPitch(); setTimeout(loop,50); })();
+
+paintPitch();
+})();
+</script>
+</body>
+</html>

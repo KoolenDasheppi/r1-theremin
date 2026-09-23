@@ -164,11 +164,15 @@ function gate(){
 /* ---------- inputs ---------- */
 function resume(){ initAudio(); if(ac.state==='suspended') ac.resume(); }
 
+var lpAt=0;
 window.addEventListener('scrollUp',function(){ sel=(sel+1)%FX.length; paintPills(); });
 window.addEventListener('scrollDown',function(){ sel=(sel+FX.length-1)%FX.length; paintPills(); });
-window.addEventListener('sideClick',function(){ var id=FX[sel].id; on[id]=!on[id]; applyFx(); paintPills(); });
-window.addEventListener('longPressStart',function(){ muted=true; gate(); paintPitch(); });
-window.addEventListener('longPressEnd',function(){ muted=false; gate(); paintPitch(); });
+window.addEventListener('sideClick',function(){
+  if(Date.now()-lpAt<600) return;   /* ignore the click a long-press may also emit */
+  var id=FX[sel].id; on[id]=!on[id]; applyFx(); paintPills();
+});
+window.addEventListener('longPressStart',function(){ muted=true; lpAt=Date.now(); gate(); paintPitch(); });
+window.addEventListener('longPressEnd',function(){ muted=false; lpAt=Date.now(); gate(); paintPitch(); });
 
 var drag=null;
 function pt(e){ var t=e.touches?e.touches[0]:e; return {x:t.clientX,y:t.clientY}; }
